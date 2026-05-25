@@ -7,6 +7,7 @@ ENV PYTHONUNBUFFERED=1
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py config.py database.py ./
+COPY . .
 
-CMD ["python", "main.py"]
+# Run both bot and web server
+CMD python server.py & python main.py
