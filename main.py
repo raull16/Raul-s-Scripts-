@@ -13,7 +13,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='.', intents=intents)  # Changed to .
 db = Database()
 
 @bot.event
@@ -30,7 +30,27 @@ async def on_ready():
     print("✅ Commands synced!")
     
     # Set status
-    await bot.change_presence(activity=discord.Game(name="/setpanel to create a panel"))
+    await bot.change_presence(activity=discord.Game(name=".help for commands"))
+
+@bot.command(name="ping")
+async def ping(ctx):
+    """Check if bot is working"""
+    await ctx.send(f"Pong! 🏓 Latency: {round(bot.latency * 1000)}ms")
+
+@bot.command(name="help")
+async def help_command(ctx):
+    """Show all commands"""
+    embed = discord.Embed(
+        title="🤖 Protection Bot Commands",
+        description="Here are all the available commands:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="📋 Panel Commands", value="`.setpanel <loader>` - Create a panel\n`.setbuyerrole <role>` - Set buyer role", inline=False)
+    embed.add_field(name="🔑 Key Commands", value="`.genkey <duration>` - Generate a key\n`.freekey #channel` - Drop free key\n`.listkeys` - List unused keys", inline=False)
+    embed.add_field(name="👤 User Management", value="`.blacklist <user>` - Blacklist user\n`.whitelist <user>` - Whitelist user\n`.forceresethwid <user>` - Reset HWID", inline=False)
+    embed.add_field(name="🛡️ Moderation", value="`.ban <user> [reason]` - Ban user\n`.timeout <user> <minutes> [reason]` - Timeout user\n`.warn <user> <reason>` - Warn user", inline=False)
+    embed.add_field(name="📢 Utility", value="`.update #channel <message>` - Post update\n`.ping` - Check bot latency", inline=False)
+    await ctx.send(embed=embed)
 
 class PanelView(discord.ui.View):
     def __init__(self):
@@ -59,7 +79,7 @@ class PanelView(discord.ui.View):
             else:
                 await interaction.response.send_message("❌ Role not found! Ask an admin to reconfigure.", ephemeral=True)
         else:
-            await interaction.response.send_message("❌ No buyer role configured! Ask an admin to run /setbuyerrole", ephemeral=True)
+            await interaction.response.send_message("❌ No buyer role configured! Ask an admin to run `.setbuyerrole`", ephemeral=True)
 
 class RedeemModal(discord.ui.Modal):
     def __init__(self):
@@ -97,9 +117,9 @@ class RedeemModal(discord.ui.Modal):
         else:
             await interaction.response.send_message("❌ Invalid or already used key!", ephemeral=True)
 
-@bot.tree.command(name="setpanel", description="Create a protection panel in current channel")
-@app_commands.describe(loader="Your loader name (e.g., Luarmor V1)")
-async def setpanel(interaction: discord.Interaction, loader: str):
+@bot.command(name="setpanel")
+async def setpanel(ctx, *, loader: str):
+    """Create a protection panel in current channel - Usage: .setpanel Luarmor V1"""
     embed = discord.Embed(
         title=f"🔒 {loader} Protection Panel",
         description="Welcome to the protection system!\n\nUse the buttons below to manage your access:",
@@ -108,19 +128,19 @@ async def setpanel(interaction: discord.Interaction, loader: str):
     embed.add_field(name="How to get access", value="1. Purchase a key from our store\n2. Click 'Redeem Key'\n3. Enter your key\n4. Click 'Get Role' for your buyer role", inline=False)
     
     view = PanelView()
-    await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ Panel created successfully!", ephemeral=True)
+    await ctx.send(embed=embed, view=view)
+    await ctx.send("✅ Panel created successfully!", delete_after=3)
 
-@bot.tree.command(name="setbuyerrole", description="Set the role buyers get when clicking Get Role")
-@app_commands.describe(role="The role to give to buyers")
-async def setbuyerrole(interaction: discord.Interaction, role: discord.Role):
+@bot.command(name="setbuyerrole")
+async def setbuyerrole(ctx, role: discord.Role):
+    """Set the role buyers get when clicking Get Role - Usage: .setbuyerrole @Buyer"""
     db.execute("INSERT INTO buyer_roles (guild_id, role_id) VALUES ($1, $2) ON CONFLICT(guild_id) DO UPDATE SET role_id = $2", 
-               interaction.guild_id, role.id)
-    await interaction.response.send_message(f"✅ Buyer role set to {role.mention}", ephemeral=True)
+               ctx.guild.id, role.id)
+    await ctx.send(f"✅ Buyer role set to {role.mention}")
 
-@bot.tree.command(name="genkey", description="Generate a key for your panel")
-@app_commands.describe(duration="Duration (e.g., 24h, 7d, 30d)")
-async def genkey(interaction: discord.Interaction, duration: str):
+@bot.command(name="genkey")
+async def genkey(ctx, duration: str):
+    """Generate a key for your panel - Usage: .genkey 24h or .genkey 7d"""
     # Parse duration
     if duration.endswith('h'):
         hours = int(duration[:-1])
@@ -130,7 +150,7 @@ async def genkey(interaction: discord.Interaction, duration: str):
         hours = days * 24
         time_text = f"{days} days"
     else:
-        await interaction.response.send_message("❌ Use format like '24h' or '7d'", ephemeral=True)
+        await ctx.send("❌ Use format like '24h' or '7d'")
         return
     
     # Generate random key
@@ -138,43 +158,43 @@ async def genkey(interaction: discord.Interaction, duration: str):
     
     # Save to database
     db.execute("INSERT INTO keys (key, panel_guild_id, panel_channel_id, time_limit) VALUES ($1, $2, $3, $4)",
-               key, interaction.guild_id, interaction.channel_id, hours)
+               key, ctx.guild.id, ctx.channel.id, hours)
     
     embed = discord.Embed(
         title="🎫 Key Generated",
         description=f"**Key:** `{key}`\n**Duration:** {time_text}\n**Status:** Unused",
         color=discord.Color.green()
     )
-    embed.set_footer(text=f"Generated by {interaction.user.name}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    embed.set_footer(text=f"Generated by {ctx.author.name}")
+    await ctx.send(embed=embed)
 
-@bot.tree.command(name="forceresethwid", description="Force reset a user's HWID")
-@app_commands.describe(user="The user to reset HWID for")
-async def forceresethwid(interaction: discord.Interaction, user: discord.User):
+@bot.command(name="forceresethwid")
+async def forceresethwid(ctx, user: discord.User):
+    """Force reset a user's HWID - Usage: .forceresethwid @user"""
     # In a real implementation, you'd have a HWID table
-    await interaction.response.send_message(f"✅ HWID reset for {user.mention}", ephemeral=True)
+    await ctx.send(f"✅ HWID reset for {user.mention}")
 
-@bot.tree.command(name="blacklist", description="Blacklist a user from redeeming keys")
-@app_commands.describe(user="The user to blacklist")
-async def blacklist(interaction: discord.Interaction, user: discord.User):
+@bot.command(name="blacklist")
+async def blacklist(ctx, user: discord.User):
+    """Blacklist a user from redeeming keys - Usage: .blacklist @user"""
     db.execute("INSERT INTO blacklist (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user.id)
-    await interaction.response.send_message(f"✅ {user.mention} has been blacklisted", ephemeral=True)
+    await ctx.send(f"✅ {user.mention} has been blacklisted")
 
-@bot.tree.command(name="whitelist", description="Whitelist a user for lifetime access")
-@app_commands.describe(user="The user to whitelist")
-async def whitelist(interaction: discord.Interaction, user: discord.User):
+@bot.command(name="whitelist")
+async def whitelist(ctx, user: discord.User):
+    """Whitelist a user for lifetime access - Usage: .whitelist @user"""
     db.execute("INSERT INTO whitelist (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user.id)
-    await interaction.response.send_message(f"✅ {user.mention} has been whitelisted for lifetime access", ephemeral=True)
+    await ctx.send(f"✅ {user.mention} has been whitelisted for lifetime access")
 
-@bot.tree.command(name="freekey", description="Drop a free key in a channel")
-@app_commands.describe(channel="The channel to drop the key in")
-async def freekey(interaction: discord.Interaction, channel: discord.TextChannel):
+@bot.command(name="freekey")
+async def freekey(ctx, channel: discord.TextChannel):
+    """Drop a free key in a channel - Usage: .freekey #channel"""
     # Generate free key
     key = '-'.join(''.join(random.choices(string.ascii_uppercase + string.digits, k=4)) for _ in range(4))
     
     # Save to database
     db.execute("INSERT INTO keys (key, panel_guild_id, panel_channel_id, time_limit, used) VALUES ($1, $2, $3, $4, $5)",
-               key, interaction.guild_id, channel.id, 24, 0)
+               key, ctx.guild.id, channel.id, 24, 0)
     
     embed = discord.Embed(
         title="🎉 FREE KEY DROP! 🎉",
@@ -193,70 +213,71 @@ async def freekey(interaction: discord.Interaction, channel: discord.TextChannel
             await copy_interaction.response.send_message(f"✅ Key copied: `{self.key_value}`", ephemeral=True)
     
     await channel.send("@everyone 🎁 **A free key has dropped!** 🎁", embed=embed, view=CopyButton(key))
-    await interaction.response.send_message(f"✅ Free key dropped in {channel.mention}", ephemeral=True)
+    await ctx.send(f"✅ Free key dropped in {channel.mention}")
 
-@bot.tree.command(name="update", description="Post an update embed in a channel")
-@app_commands.describe(channel="The channel to post in", message="The update message")
-async def update(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
+@bot.command(name="update")
+async def update(ctx, channel: discord.TextChannel, *, message: str):
+    """Post an update embed in a channel - Usage: .update #channel Your message here"""
     embed = discord.Embed(
         title="📢 **Updates**",
         description=message,
         color=discord.Color.blue(),
         timestamp=datetime.now()
     )
-    embed.set_footer(text=f"Posted by {interaction.user.name}", icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    embed.set_footer(text=f"Posted by {ctx.author.name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
     await channel.send(embed=embed)
-    await interaction.response.send_message(f"✅ Update posted in {channel.mention}", ephemeral=True)
+    await ctx.send(f"✅ Update posted in {channel.mention}")
 
-@bot.tree.command(name="ban", description="Ban a user from the server")
-@app_commands.describe(user="User to ban", reason="Reason for ban")
-async def ban(interaction: discord.Interaction, user: discord.User, reason: str = "No reason provided"):
-    if not interaction.user.guild_permissions.ban_members:
-        await interaction.response.send_message("❌ You don't have permission to ban members!", ephemeral=True)
+@bot.command(name="ban")
+async def ban(ctx, user: discord.User, *, reason: str = "No reason provided"):
+    """Ban a user from the server - Usage: .ban @user reason"""
+    if not ctx.author.guild_permissions.ban_members:
+        await ctx.send("❌ You don't have permission to ban members!")
         return
     
-    member = interaction.guild.get_member(user.id)
+    member = ctx.guild.get_member(user.id)
     if member:
         await member.ban(reason=reason)
-        await interaction.response.send_message(f"✅ Banned {user.mention} | Reason: {reason}", ephemeral=True)
+        await ctx.send(f"✅ Banned {user.mention} | Reason: {reason}")
     else:
-        await interaction.response.send_message(f"❌ Could not find {user.mention} in this server", ephemeral=True)
+        await ctx.send(f"❌ Could not find {user.mention} in this server")
 
-@bot.tree.command(name="timeout", description="Timeout a user")
-@app_commands.describe(user="User to timeout", minutes="Minutes to timeout", reason="Reason")
-async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason"):
-    if not interaction.user.guild_permissions.moderate_members:
-        await interaction.response.send_message("❌ You don't have permission to timeout members!", ephemeral=True)
+@bot.command(name="timeout")
+async def timeout(ctx, user: discord.Member, minutes: int, *, reason: str = "No reason"):
+    """Timeout a user - Usage: .timeout @user 10 Spamming"""
+    if not ctx.author.guild_permissions.moderate_members:
+        await ctx.send("❌ You don't have permission to timeout members!")
         return
     
     duration = timedelta(minutes=minutes)
     await user.timeout(duration, reason=reason)
-    await interaction.response.send_message(f"✅ Timed out {user.mention} for {minutes} minutes | Reason: {reason}", ephemeral=True)
+    await ctx.send(f"✅ Timed out {user.mention} for {minutes} minutes | Reason: {reason}")
 
-@bot.tree.command(name="warn", description="Warn a user (DMs them)")
-@app_commands.describe(user="User to warn", reason="Reason for warning")
-async def warn(interaction: discord.Interaction, user: discord.User, reason: str):
+@bot.command(name="warn")
+async def warn(ctx, user: discord.User, *, reason: str):
+    """Warn a user (DMs them) - Usage: .warn @user Breaking rules"""
     embed = discord.Embed(
         title="⚠️ Warning",
-        description=f"You have received a warning in **{interaction.guild.name}**\n\n**Reason:** {reason}\n**Warned by:** {interaction.user.name}",
+        description=f"You have received a warning in **{ctx.guild.name}**\n\n**Reason:** {reason}\n**Warned by:** {ctx.author.name}",
         color=discord.Color.orange()
     )
     try:
         await user.send(embed=embed)
-        await interaction.response.send_message(f"✅ Warned {user.mention} | Reason: {reason} (DM sent)", ephemeral=True)
+        await ctx.send(f"✅ Warned {user.mention} | Reason: {reason} (DM sent)")
     except:
-        await interaction.response.send_message(f"✅ Warned {user.mention} | Reason: {reason} (Could not DM)", ephemeral=True)
+        await ctx.send(f"✅ Warned {user.mention} | Reason: {reason} (Could not DM)")
 
-@bot.tree.command(name="listkeys", description="List all unused keys")
-async def listkeys(interaction: discord.Interaction):
+@bot.command(name="listkeys")
+async def listkeys(ctx):
+    """List all unused keys"""
     keys = db.fetch("SELECT key, time_limit FROM keys WHERE used = 0 LIMIT 10")
     if keys:
         embed = discord.Embed(title="📋 Unused Keys", color=discord.Color.blue())
         key_list = "\n".join([f"`{k['key']}` - {k['time_limit']} hours" for k in keys])
         embed.description = key_list
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await ctx.send(embed=embed)
     else:
-        await interaction.response.send_message("No unused keys found.", ephemeral=True)
+        await ctx.send("No unused keys found.")
 
 # Keep the bot alive
 async def keep_alive():
