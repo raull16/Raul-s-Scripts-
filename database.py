@@ -1,20 +1,22 @@
 import sqlite3
-import os
-import json
+import asyncio
+from threading import Lock
 
 class Database:
     def __init__(self):
         self.conn = None
-        self.use_json = False
+        self.lock = Lock()
     
     async def init(self):
-        # Use SQLite (no external database needed)
-        self.conn = sqlite3.connect('bot_data.db')
-        self.cursor = self.conn.cursor()
-        await self.create_tables()
+        # Run in executor to not block async
+        await asyncio.get_event_loop().run_in_executor(None, self._init_sync)
     
-    async def create_tables(self):
-        self.cursor.execute('''
+    def _init_sync(self):
+        self.conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+        cursor = self.conn.cursor()
+        
+        # Create all tables
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS panels (
                 guild_id INTEGER,
                 channel_id INTEGER,
@@ -23,7 +25,7 @@ class Database:
             )
         ''')
         
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS keys (
                 key TEXT PRIMARY KEY,
                 panel_guild_id INTEGER,
@@ -34,26 +36,26 @@ class Database:
             )
         ''')
         
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS blacklist (
                 user_id INTEGER PRIMARY KEY
             )
         ''')
         
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS whitelist (
                 user_id INTEGER PRIMARY KEY
             )
         ''')
         
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS buyer_roles (
                 guild_id INTEGER PRIMARY KEY,
                 role_id INTEGER
             )
         ''')
         
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS hwids (
                 user_id INTEGER,
                 hwid TEXT,
@@ -64,46 +66,48 @@ class Database:
         self.conn.commit()
     
     async def execute(self, query, *args):
-        # Convert asyncpg style to sqlite
-        if 'INSERT INTO' in query and 'ON CONFLICT' in query:
-            # Handle ON CONFLICT for sqlite
-            query = query.replace('ON CONFLICT', 'ON CONFLICT')
+        def _execute():
+            cursor = self.conn.cursor()
+            # Convert asyncpg-style placeholders ($1, $2) to sqlite (?)
+            sqlite_query = query.replace('$1', '?').replace('$2', '?').replace('$3', '?').replace('$4', '?').replace('$5', '?')
+            cursor.execute(sqlite_query, args)
+            self.conn.commit()
+            return cursor
         
-        self.cursor.execute(query, args)
-        self.conn.commit()
+        return await asyncio.get_event_loop().run_in_executor(None, _execute)
     
     async def fetchrow(self, query, *args):
-        self.cursor.execute(query, args)
-        row = self.cursor.fetchone()
-        if row:
-            return dict(zip([desc[0] for desc in self.cursor.description], row))
-        return None
+        def _fetchrow():
+            cursor = self.conn.cursor()
+            sqlite_query = query.replace('$1', '?').replace('$2', '?').replace('$3', '?').replace('$4', '?').replace('$5', '?')
+            cursor.execute(sqlite_query, args)
+            row = cursor.fetchone()
+            if row:
+                columns = [description[0] for description in cursor.description]
+                return dict(zip(columns, row))
+            return None
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _fetchrow)
     
     async def fetch(self, query, *args):
-        self.cursor.execute(query, args)
-        rows = self.cursor.fetchall()
-        return [dict(zip([desc[0] for desc in self.cursor.description], row)) for row in rows]
+        def _fetch():
+            cursor = self.conn.cursor()
+            sqlite_query = query.replace('$1', '?').replace('$2', '?').replace('$3', '?').replace('$4', '?').replace('$5', '?')
+            cursor.execute(sqlite_query, args)
+            rows = cursor.fetchall()
+            if rows:
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+            return []
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _fetch)
     
     async def acquire(self):
-        # For compatibility with asyncpg context manager
-        class FakeConnection:
-            def __init__(self, db):
-                self.db = db
-            
-            async def execute(self, query, *args):
-                self.db.cursor.execute(query, args)
-                self.db.conn.commit()
-            
-            async def fetchrow(self, query, *args):
-                self.db.cursor.execute(query, args)
-                row = self.db.cursor.fetchone()
-                if row:
-                    return dict(zip([desc[0] for desc in self.db.cursor.description], row))
-                return None
-            
-            async def fetch(self, query, *args):
-                self.db.cursor.execute(query, args)
-                rows = self.db.cursor.fetchall()
-                return [dict(zip([desc[0] for desc in self.db.cursor.description], row)) for row in rows]
-        
-        return FakeConnection(self)
+        # For compatibility - returns self as a context manager
+        return self
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
