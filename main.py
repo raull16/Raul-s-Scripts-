@@ -19,7 +19,6 @@ intents.members = True
 bot = commands.Bot(command_prefix='.', intents=intents)
 db = Database()
 
-# Create scripts directory
 os.makedirs('scripts', exist_ok=True)
 
 @bot.event
@@ -59,14 +58,15 @@ async def slash_setpanel(interaction: discord.Interaction, loader: str):
 @bot.tree.command(name="hostscript", description="Host a script file for your panel")
 @app_commands.describe(script_name="Name of your script (e.g., loader.lua)")
 async def slash_hostscript(interaction: discord.Interaction, script_name: str):
-    # This needs a file attachment - check if they attached one
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.attachments:
-        await interaction.response.send_message("❌ Please attach a Lua file with your command!", ephemeral=True)
+        await interaction.followup.send("❌ Please attach a Lua file with your command!", ephemeral=True)
         return
     
     attachment = interaction.attachments[0]
     if not attachment.filename.endswith('.lua'):
-        await interaction.response.send_message("❌ Only .lua files are allowed!", ephemeral=True)
+        await interaction.followup.send("❌ Only .lua files are allowed!", ephemeral=True)
         return
     
     # Download and save the script
@@ -77,8 +77,7 @@ async def slash_hostscript(interaction: discord.Interaction, script_name: str):
     db.execute("INSERT INTO scripts (guild_id, script_name, file_path) VALUES ($1, $2, $3) ON CONFLICT(guild_id, script_name) DO UPDATE SET file_path = $3",
                interaction.guild.id, script_name, file_path)
     
-    # Get your Railway URL (you'll need to set this)
-    railway_url = os.getenv('RAILWAY_URL', 'https://your-project.railway.app')
+    railway_url = os.getenv('RAILWAY_URL', 'https://raul-scripts-bot-production.up.railway.app')
     
     embed = discord.Embed(
         title="✅ Script Hosted!",
@@ -86,28 +85,35 @@ async def slash_hostscript(interaction: discord.Interaction, script_name: str):
         color=discord.Color.green()
     )
     embed.add_field(name="📜 Loadstring", value=f"```lua\nloadstring(game:HttpGet(\"{railway_url}/getscript?guild={interaction.guild.id}&name={script_name}\"))()\n```", inline=False)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="viewscript", description="View a hosted script")
 @app_commands.describe(script_name="Name of the script to view")
 async def slash_viewscript(interaction: discord.Interaction, script_name: str):
+    await interaction.response.defer(ephemeral=True)
+    
     script = db.fetchrow("SELECT * FROM scripts WHERE guild_id = $1 AND script_name = $2", 
                          interaction.guild.id, script_name)
     if script:
-        async with aiofiles.open(script['file_path'], 'r') as f:
-            content = await f.read()
-            if len(content) > 1900:
-                content = content[:1900] + "..."
-        embed = discord.Embed(title=f"📜 {script_name}", description=f"```lua\n{content}\n```", color=discord.Color.blue())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        try:
+            async with aiofiles.open(script['file_path'], 'r') as f:
+                content = await f.read()
+                if len(content) > 1900:
+                    content = content[:1900] + "..."
+            embed = discord.Embed(title=f"📜 {script_name}", description=f"```lua\n{content}\n```", color=discord.Color.blue())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            await interaction.followup.send("❌ Error reading script file!", ephemeral=True)
     else:
-        await interaction.response.send_message(f"❌ Script `{script_name}` not found!", ephemeral=True)
+        await interaction.followup.send(f"❌ Script `{script_name}` not found!", ephemeral=True)
 
 @bot.tree.command(name="genkey", description="Generate a key")
 @app_commands.describe(duration="Duration (24h, 7d, 30d)")
 async def slash_genkey(interaction: discord.Interaction, duration: str):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Admin only!", ephemeral=True)
+        await interaction.followup.send("❌ Admin only!", ephemeral=True)
         return
     
     if duration.endswith('h'):
@@ -118,7 +124,7 @@ async def slash_genkey(interaction: discord.Interaction, duration: str):
         hours = days * 24
         time_text = f"{days} days"
     else:
-        await interaction.response.send_message("❌ Use 24h, 7d, or 30d!", ephemeral=True)
+        await interaction.followup.send("❌ Use 24h, 7d, or 30d!", ephemeral=True)
         return
     
     key = '-'.join(''.join(random.choices(string.ascii_uppercase + string.digits, k=4)) for _ in range(4))
@@ -128,46 +134,54 @@ async def slash_genkey(interaction: discord.Interaction, duration: str):
     embed = discord.Embed(title="🎫 Key Generated", color=discord.Color.green())
     embed.add_field(name="Key", value=f"`{key}`", inline=False)
     embed.add_field(name="Duration", value=time_text, inline=True)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="whitelist", description="Whitelist a user for lifetime access")
 @app_commands.describe(user="User to whitelist")
 async def slash_whitelist(interaction: discord.Interaction, user: discord.User):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Admin only!", ephemeral=True)
+        await interaction.followup.send("❌ Admin only!", ephemeral=True)
         return
     
     db.execute("INSERT INTO whitelist (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user.id)
-    await interaction.response.send_message(f"✅ {user.mention} whitelisted (lifetime access)", ephemeral=True)
+    await interaction.followup.send(f"✅ {user.mention} whitelisted (lifetime access)", ephemeral=True)
 
 @bot.tree.command(name="unwhitelist", description="Remove a user from whitelist")
 @app_commands.describe(user="User to remove")
 async def slash_unwhitelist(interaction: discord.Interaction, user: discord.User):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Admin only!", ephemeral=True)
+        await interaction.followup.send("❌ Admin only!", ephemeral=True)
         return
     
     db.execute("DELETE FROM whitelist WHERE user_id = $1", user.id)
-    await interaction.response.send_message(f"❌ {user.mention} removed from whitelist", ephemeral=True)
+    await interaction.followup.send(f"❌ {user.mention} removed from whitelist", ephemeral=True)
 
 @bot.tree.command(name="checkaccess", description="Check if a user has access")
 @app_commands.describe(user="User to check")
 async def slash_checkaccess(interaction: discord.Interaction, user: discord.User):
+    await interaction.response.defer(ephemeral=True)
+    
     whitelisted = db.fetchrow("SELECT * FROM whitelist WHERE user_id = $1", user.id)
     key_used = db.fetchrow("SELECT * FROM keys WHERE used_by = $1 AND used = 1", user.id)
     
     if whitelisted:
-        await interaction.response.send_message(f"✅ {user.mention} has **LIFETIME** access", ephemeral=True)
+        await interaction.followup.send(f"✅ {user.mention} has **LIFETIME** access", ephemeral=True)
     elif key_used:
-        await interaction.response.send_message(f"✅ {user.mention} has access (key redeemed)", ephemeral=True)
+        await interaction.followup.send(f"✅ {user.mention} has access (key redeemed)", ephemeral=True)
     else:
-        await interaction.response.send_message(f"❌ {user.mention} does NOT have access", ephemeral=True)
+        await interaction.followup.send(f"❌ {user.mention} does NOT have access", ephemeral=True)
 
 @bot.tree.command(name="freekey", description="Drop a free key in a channel")
 @app_commands.describe(channel="Channel to drop the key in")
 async def slash_freekey(interaction: discord.Interaction, channel: discord.TextChannel):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Admin only!", ephemeral=True)
+        await interaction.followup.send("❌ Admin only!", ephemeral=True)
         return
     
     key = '-'.join(''.join(random.choices(string.ascii_uppercase + string.digits, k=4)) for _ in range(4))
@@ -185,75 +199,87 @@ async def slash_freekey(interaction: discord.Interaction, channel: discord.TextC
             await i.response.send_message(f"✅ Key: `{self.k}`", ephemeral=True)
     
     await channel.send("@everyone 🎁 **FREE KEY DROP!**", embed=embed, view=CopyButton(key))
-    await interaction.response.send_message(f"✅ Free key dropped in {channel.mention}", ephemeral=True)
+    await interaction.followup.send(f"✅ Free key dropped in {channel.mention}", ephemeral=True)
 
 @bot.tree.command(name="listkeys", description="List all unused keys")
 async def slash_listkeys(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Admin only!", ephemeral=True)
+        await interaction.followup.send("❌ Admin only!", ephemeral=True)
         return
     
     keys = db.fetch("SELECT key, time_limit FROM keys WHERE used = 0 LIMIT 10")
     if keys:
         msg = "\n".join([f"`{k['key']}` - {k['time_limit']} hours" for k in keys])
-        await interaction.response.send_message(f"📋 **Unused Keys:**\n{msg}", ephemeral=True)
+        await interaction.followup.send(f"📋 **Unused Keys:**\n{msg}", ephemeral=True)
     else:
-        await interaction.response.send_message("No unused keys.", ephemeral=True)
+        await interaction.followup.send("No unused keys.", ephemeral=True)
 
 @bot.tree.command(name="setbuyerrole", description="Set the role for buyers")
 @app_commands.describe(role="Role to give to buyers")
 async def slash_setbuyerrole(interaction: discord.Interaction, role: discord.Role):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Admin only!", ephemeral=True)
+        await interaction.followup.send("❌ Admin only!", ephemeral=True)
         return
     
     db.execute("INSERT INTO buyer_roles (guild_id, role_id) VALUES ($1, $2) ON CONFLICT(guild_id) DO UPDATE SET role_id = $2", 
                interaction.guild.id, role.id)
-    await interaction.response.send_message(f"✅ Buyer role set to {role.mention}", ephemeral=True)
+    await interaction.followup.send(f"✅ Buyer role set to {role.mention}", ephemeral=True)
 
 @bot.tree.command(name="ban", description="Ban a user")
 @app_commands.describe(user="User to ban", reason="Reason for ban")
 async def slash_ban(interaction: discord.Interaction, user: discord.User, reason: str = "No reason"):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.ban_members:
-        await interaction.response.send_message("❌ No permission!", ephemeral=True)
+        await interaction.followup.send("❌ No permission!", ephemeral=True)
         return
     member = interaction.guild.get_member(user.id)
     if member:
         await member.ban(reason=reason)
-        await interaction.response.send_message(f"✅ Banned {user.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Banned {user.mention}", ephemeral=True)
     else:
-        await interaction.response.send_message("❌ User not found", ephemeral=True)
+        await interaction.followup.send("❌ User not found", ephemeral=True)
 
 @bot.tree.command(name="timeout", description="Timeout a user")
 @app_commands.describe(user="User to timeout", minutes="Minutes to timeout", reason="Reason")
 async def slash_timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason"):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.moderate_members:
-        await interaction.response.send_message("❌ No permission!", ephemeral=True)
+        await interaction.followup.send("❌ No permission!", ephemeral=True)
         return
     await user.timeout(timedelta(minutes=minutes), reason=reason)
-    await interaction.response.send_message(f"✅ Timed out {user.mention} for {minutes} minutes", ephemeral=True)
+    await interaction.followup.send(f"✅ Timed out {user.mention} for {minutes} minutes", ephemeral=True)
 
 @bot.tree.command(name="warn", description="Warn a user")
 @app_commands.describe(user="User to warn", reason="Reason for warning")
 async def slash_warn(interaction: discord.Interaction, user: discord.User, reason: str):
+    await interaction.response.defer(ephemeral=True)
+    
     embed = discord.Embed(title="⚠️ Warning", description=f"In {interaction.guild.name}\nReason: {reason}", color=discord.Color.orange())
     try:
         await user.send(embed=embed)
-        await interaction.response.send_message(f"✅ Warned {user.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Warned {user.mention}", ephemeral=True)
     except:
-        await interaction.response.send_message(f"✅ Warned {user.mention} (DM failed)", ephemeral=True)
+        await interaction.followup.send(f"✅ Warned {user.mention} (DM failed)", ephemeral=True)
 
 @bot.tree.command(name="update", description="Post an update in a channel")
 @app_commands.describe(channel="Channel to post in", message="Update message")
 async def slash_update(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
+    await interaction.response.defer(ephemeral=True)
+    
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Admin only!", ephemeral=True)
+        await interaction.followup.send("❌ Admin only!", ephemeral=True)
         return
     
     embed = discord.Embed(title="📢 Update", description=message, color=discord.Color.blue(), timestamp=datetime.now())
     embed.set_footer(text=f"Posted by {interaction.user.name}")
     await channel.send(embed=embed)
-    await interaction.response.send_message(f"✅ Update posted in {channel.mention}", ephemeral=True)
+    await interaction.followup.send(f"✅ Update posted in {channel.mention}", ephemeral=True)
 
 # ============ BUTTON PANEL ============
 
@@ -282,9 +308,8 @@ class PanelView(discord.ui.View):
         key_used = db.fetchrow("SELECT * FROM keys WHERE used_by = $1 AND used = 1", interaction.user.id)
         
         if has_access or key_used:
-            # Get the first script for this guild
             script = db.fetchrow("SELECT script_name FROM scripts WHERE guild_id = $1 LIMIT 1", interaction.guild.id)
-            railway_url = os.getenv('RAILWAY_URL', 'https://your-project.railway.app')
+            railway_url = os.getenv('RAILWAY_URL', 'https://raul-scripts-bot-production.up.railway.app')
             
             if script:
                 loadstring_url = f"{railway_url}/getscript?guild={interaction.guild.id}&name={script['script_name']}&user={interaction.user.id}"
@@ -343,15 +368,11 @@ class RedeemModal(discord.ui.Modal):
         # Check key
         key_data = db.fetchrow("SELECT * FROM keys WHERE key = $1 AND used = 0", key)
         if key_data:
-            # Mark key as used
             db.execute("UPDATE keys SET used = 1, used_by = $1 WHERE key = $2", interaction.user.id, key)
-            
-            # Auto-whitelist the user
             db.execute("INSERT INTO whitelist (user_id) VALUES ($1) ON CONFLICT DO NOTHING", interaction.user.id)
             
-            # Get script for this guild
             script = db.fetchrow("SELECT script_name FROM scripts WHERE guild_id = $1 LIMIT 1", interaction.guild.id)
-            railway_url = os.getenv('RAILWAY_URL', 'https://your-project.railway.app')
+            railway_url = os.getenv('RAILWAY_URL', 'https://raul-scripts-bot-production.up.railway.app')
             
             if script:
                 loadstring_url = f"{railway_url}/getscript?guild={interaction.guild.id}&name={script['script_name']}&user={interaction.user.id}"
@@ -367,14 +388,14 @@ class RedeemModal(discord.ui.Modal):
             
             await interaction.response.send_message(embed=embed, ephemeral=True)
             
-            # Log to channel
+            # Log
             log_channel = discord.utils.get(interaction.guild.text_channels, name="key-logs")
             if log_channel:
                 await log_channel.send(f"✅ {interaction.user} redeemed key: `{key}`")
         else:
             await interaction.response.send_message("❌ Invalid or already used key!", ephemeral=True)
 
-# ============ UPDATE DATABASE ============
+# ============ KEEP ALIVE ============
 
 async def keep_alive():
     while True:
