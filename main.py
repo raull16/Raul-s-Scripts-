@@ -15,6 +15,9 @@ intents.members = True
 bot = commands.Bot(command_prefix='.', intents=intents)
 db = Database()
 
+# Remove default help command so we can add our own
+bot.remove_command('help')
+
 @bot.event
 async def on_ready():
     print(f'✅ Bot is online! Logged in as {bot.user}')
@@ -208,5 +211,6 @@ async def keep_alive():
 
 if __name__ == "__main__":
     print("Starting...")
-    asyncio.create_task(keep_alive())
+    loop = asyncio.get_event_loop()
+    loop.create_task(keep_alive())
     bot.run(config.TOKEN)
