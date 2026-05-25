@@ -15,7 +15,7 @@ class Database:
         self.conn = sqlite3.connect('bot_data.db', check_same_thread=False)
         cursor = self.conn.cursor()
         
-        # Create all tables
+        # Create keys table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS keys (
                 key TEXT PRIMARY KEY,
@@ -27,18 +27,21 @@ class Database:
             )
         ''')
         
+        # Create blacklist table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS blacklist (
                 user_id INTEGER PRIMARY KEY
             )
         ''')
         
+        # Create whitelist table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS whitelist (
                 user_id INTEGER PRIMARY KEY
             )
         ''')
         
+        # Create buyer_roles table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS buyer_roles (
                 guild_id INTEGER PRIMARY KEY,
@@ -46,11 +49,31 @@ class Database:
             )
         ''')
         
+        # Create hwids table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS hwids (
+                user_id INTEGER,
+                hwid TEXT,
+                PRIMARY KEY (user_id, hwid)
+            )
+        ''')
+        
+        # Create scripts table (for hosted scripts)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scripts (
+                guild_id INTEGER,
+                script_name TEXT,
+                file_path TEXT,
+                PRIMARY KEY (guild_id, script_name)
+            )
+        ''')
+        
         self.conn.commit()
+        print("✅ Database tables created successfully!")
     
     def execute(self, query, *args):
         cursor = self.conn.cursor()
-        # Convert $1, $2 to ?
+        # Convert $1, $2, etc. to ?
         for i in range(1, 10):
             query = query.replace(f'${i}', '?')
         cursor.execute(query, args)
@@ -78,3 +101,7 @@ class Database:
             columns = [description[0] for description in cursor.description]
             return [dict(zip(columns, row)) for row in rows]
         return []
+    
+    def close(self):
+        if self.conn:
+            self.conn.close()
