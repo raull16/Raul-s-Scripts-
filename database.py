@@ -1,107 +1,42 @@
 import sqlite3
-import asyncio
-import os
+import json
+from typing import List, Dict
 
-class Database:
-    def __init__(self):
-        self.conn = None
-    
-    async def init(self):
-        # Run in executor to not block async
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._init_sync)
-    
-    def _init_sync(self):
-        self.conn = sqlite3.connect('bot_data.db', check_same_thread=False)
-        cursor = self.conn.cursor()
-        
-        # Create keys table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS keys (
-                key TEXT PRIMARY KEY,
-                panel_guild_id INTEGER,
-                panel_channel_id INTEGER,
-                time_limit INTEGER,
-                used INTEGER DEFAULT 0,
-                used_by INTEGER DEFAULT NULL
-            )
-        ''')
-        
-        # Create blacklist table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS blacklist (
-                user_id INTEGER PRIMARY KEY
-            )
-        ''')
-        
-        # Create whitelist table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS whitelist (
-                user_id INTEGER PRIMARY KEY
-            )
-        ''')
-        
-        # Create buyer_roles table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS buyer_roles (
-                guild_id INTEGER PRIMARY KEY,
-                role_id INTEGER
-            )
-        ''')
-        
-        # Create hwids table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS hwids (
-                user_id INTEGER,
-                hwid TEXT,
-                PRIMARY KEY (user_id, hwid)
-            )
-        ''')
-        
-        # Create scripts table (for hosted scripts)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scripts (
-                guild_id INTEGER,
-                script_name TEXT,
-                file_path TEXT,
-                PRIMARY KEY (guild_id, script_name)
-            )
-        ''')
-        
-        self.conn.commit()
-        print("✅ Database tables created successfully!")
-    
-    def execute(self, query, *args):
-        cursor = self.conn.cursor()
-        # Convert $1, $2, etc. to ?
-        for i in range(1, 10):
-            query = query.replace(f'${i}', '?')
-        cursor.execute(query, args)
-        self.conn.commit()
-        return cursor
-    
-    def fetchrow(self, query, *args):
-        cursor = self.conn.cursor()
-        for i in range(1, 10):
-            query = query.replace(f'${i}', '?')
-        cursor.execute(query, args)
-        row = cursor.fetchone()
-        if row:
-            columns = [description[0] for description in cursor.description]
-            return dict(zip(columns, row))
-        return None
-    
-    def fetch(self, query, *args):
-        cursor = self.conn.cursor()
-        for i in range(1, 10):
-            query = query.replace(f'${i}', '?')
-        cursor.execute(query, args)
-        rows = cursor.fetchall()
-        if rows:
-            columns = [description[0] for description in cursor.description]
-            return [dict(zip(columns, row)) for row in rows]
-        return []
-    
-    def close(self):
-        if self.conn:
-            self.conn.close()
+DB_PATH = "vexis_data.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS guild_configs (
+            guild_id INTEGER PRIMARY KEY,
+            channel_ids TEXT NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_channels(guild_id: int) -> List[int]:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_ids FROM guild_configs WHERE guild_id = ?", (guild_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return json.loads(row[0])
+    return []
+
+def set_channels(guild_id: int, channel_ids: List[int]):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO guild_configs (guild_id, channel_ids) VALUES (?, ?)",
+                   (guild_id, json.dumps(channel_ids)))
+    conn.commit()
+    conn.close()
+
+def remove_guild(guild_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM guild_configs WHERE guild_id = ?", (guild_id,))
+    conn.commit()
+    conn.close()
