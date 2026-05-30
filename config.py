@@ -1,6 +1,7 @@
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+TOKEN = os.environ.get("TOKEN")
+WEBSOCKET_URL = "wss://join.signorefinderws.org/ws"
 
-TOKEN = os.getenv('TOKEN')
+if not TOKEN:
+    raise ValueError("TOKEN environment variable not set")
