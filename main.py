@@ -1,409 +1,248 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
-import random
-import string
+from discord.ext import commands
 import asyncio
-import secrets
-import aiofiles
-import os
-from datetime import datetime, timedelta
-import config
-from database import Database
-import json
+import logging
+from datetime import datetime
 
+import config
+from database import init_db, get_channels, set_channels, remove_guild
+from websocket_handler import WebSocketHandler
+from webhook_manager import WebhookManager
+from embeds import create_finding_embed, create_status_embed, create_config_embed
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+intents.guilds = True
 
-bot = commands.Bot(command_prefix='.', intents=intents)
-db = Database()
-
-os.makedirs('scripts', exist_ok=True)
-
-@bot.event
-async def on_ready():
-    print(f'✅ Bot online! {bot.user}')
-    await db.init()
-    await bot.tree.sync()
-    await bot.change_presence(activity=discord.Game(name="/help"))
-    print('✅ Ready!')
-
-# ============ SLASH COMMANDS ============
-
-@bot.tree.command(name="help", description="Show all commands")
-async def slash_help(interaction: discord.Interaction):
-    embed = discord.Embed(title="🔒 Protection Bot", color=discord.Color.blue())
-    embed.add_field(name="📋 Panel", value="/setpanel <loader>\n/setbuyerrole <role>", inline=True)
-    embed.add_field(name="💰 Keys", value="/genkey <duration>\n/freekey #channel\n/listkeys", inline=True)
-    embed.add_field(name="📜 Script", value="/hostscript <name> (attach file)\n/viewscript <name>", inline=True)
-    embed.add_field(name="👤 Users", value="/whitelist <user>\n/unwhitelist <user>\n/checkaccess <user>", inline=True)
-    embed.add_field(name="🛡️ Admin", value="/ban <user>\n/timeout <user> <minutes>\n/warn <user> <reason>", inline=True)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="setpanel", description="Create a protection panel in current channel")
-@app_commands.describe(loader="Your loader name (e.g., Luarmor V1)")
-async def slash_setpanel(interaction: discord.Interaction, loader: str):
-    embed = discord.Embed(
-        title=f"🔒 {loader}",
-        description="**Get access to our protected script!**\n\n💳 **Buy Access** - Purchase a key\n🔑 **Redeem Key** - Enter your purchased key\n📜 **Get Script** - Get your loadstring\n👑 **Get Role** - Get your buyer role",
-        color=discord.Color.blue()
-    )
-    embed.set_footer(text="DM an admin to purchase a key")
-    
-    view = PanelView()
-    await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ Panel created!", ephemeral=True)
-
-@bot.tree.command(name="hostscript", description="Host a script file for your panel")
-@app_commands.describe(script_name="Name of your script (e.g., loader.lua)")
-async def slash_hostscript(interaction: discord.Interaction, script_name: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.attachments:
-        await interaction.followup.send("❌ Please attach a Lua file with your command!", ephemeral=True)
-        return
-    
-    attachment = interaction.attachments[0]
-    if not attachment.filename.endswith('.lua'):
-        await interaction.followup.send("❌ Only .lua files are allowed!", ephemeral=True)
-        return
-    
-    # Download and save the script
-    file_path = f"scripts/{script_name}_{interaction.guild.id}.lua"
-    await attachment.save(file_path)
-    
-    # Save to database
-    db.execute("INSERT INTO scripts (guild_id, script_name, file_path) VALUES ($1, $2, $3) ON CONFLICT(guild_id, script_name) DO UPDATE SET file_path = $3",
-               interaction.guild.id, script_name, file_path)
-    
-    railway_url = os.getenv('RAILWAY_URL', 'https://raul-scripts-bot-production.up.railway.app')
-    
-    embed = discord.Embed(
-        title="✅ Script Hosted!",
-        description=f"Script `{script_name}` has been hosted successfully!",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="📜 Loadstring", value=f"```lua\nloadstring(game:HttpGet(\"{railway_url}/getscript?guild={interaction.guild.id}&name={script_name}\"))()\n```", inline=False)
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="viewscript", description="View a hosted script")
-@app_commands.describe(script_name="Name of the script to view")
-async def slash_viewscript(interaction: discord.Interaction, script_name: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    script = db.fetchrow("SELECT * FROM scripts WHERE guild_id = $1 AND script_name = $2", 
-                         interaction.guild.id, script_name)
-    if script:
-        try:
-            async with aiofiles.open(script['file_path'], 'r') as f:
-                content = await f.read()
-                if len(content) > 1900:
-                    content = content[:1900] + "..."
-            embed = discord.Embed(title=f"📜 {script_name}", description=f"```lua\n{content}\n```", color=discord.Color.blue())
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        except:
-            await interaction.followup.send("❌ Error reading script file!", ephemeral=True)
-    else:
-        await interaction.followup.send(f"❌ Script `{script_name}` not found!", ephemeral=True)
-
-@bot.tree.command(name="genkey", description="Generate a key")
-@app_commands.describe(duration="Duration (24h, 7d, 30d)")
-async def slash_genkey(interaction: discord.Interaction, duration: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ Admin only!", ephemeral=True)
-        return
-    
-    if duration.endswith('h'):
-        hours = int(duration[:-1])
-        time_text = f"{hours} hours"
-    elif duration.endswith('d'):
-        days = int(duration[:-1])
-        hours = days * 24
-        time_text = f"{days} days"
-    else:
-        await interaction.followup.send("❌ Use 24h, 7d, or 30d!", ephemeral=True)
-        return
-    
-    key = '-'.join(''.join(random.choices(string.ascii_uppercase + string.digits, k=4)) for _ in range(4))
-    db.execute("INSERT INTO keys (key, panel_guild_id, panel_channel_id, time_limit) VALUES ($1, $2, $3, $4)", 
-               key, interaction.guild.id, interaction.channel.id, hours)
-    
-    embed = discord.Embed(title="🎫 Key Generated", color=discord.Color.green())
-    embed.add_field(name="Key", value=f"`{key}`", inline=False)
-    embed.add_field(name="Duration", value=time_text, inline=True)
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="whitelist", description="Whitelist a user for lifetime access")
-@app_commands.describe(user="User to whitelist")
-async def slash_whitelist(interaction: discord.Interaction, user: discord.User):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ Admin only!", ephemeral=True)
-        return
-    
-    db.execute("INSERT INTO whitelist (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user.id)
-    await interaction.followup.send(f"✅ {user.mention} whitelisted (lifetime access)", ephemeral=True)
-
-@bot.tree.command(name="unwhitelist", description="Remove a user from whitelist")
-@app_commands.describe(user="User to remove")
-async def slash_unwhitelist(interaction: discord.Interaction, user: discord.User):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ Admin only!", ephemeral=True)
-        return
-    
-    db.execute("DELETE FROM whitelist WHERE user_id = $1", user.id)
-    await interaction.followup.send(f"❌ {user.mention} removed from whitelist", ephemeral=True)
-
-@bot.tree.command(name="checkaccess", description="Check if a user has access")
-@app_commands.describe(user="User to check")
-async def slash_checkaccess(interaction: discord.Interaction, user: discord.User):
-    await interaction.response.defer(ephemeral=True)
-    
-    whitelisted = db.fetchrow("SELECT * FROM whitelist WHERE user_id = $1", user.id)
-    key_used = db.fetchrow("SELECT * FROM keys WHERE used_by = $1 AND used = 1", user.id)
-    
-    if whitelisted:
-        await interaction.followup.send(f"✅ {user.mention} has **LIFETIME** access", ephemeral=True)
-    elif key_used:
-        await interaction.followup.send(f"✅ {user.mention} has access (key redeemed)", ephemeral=True)
-    else:
-        await interaction.followup.send(f"❌ {user.mention} does NOT have access", ephemeral=True)
-
-@bot.tree.command(name="freekey", description="Drop a free key in a channel")
-@app_commands.describe(channel="Channel to drop the key in")
-async def slash_freekey(interaction: discord.Interaction, channel: discord.TextChannel):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ Admin only!", ephemeral=True)
-        return
-    
-    key = '-'.join(''.join(random.choices(string.ascii_uppercase + string.digits, k=4)) for _ in range(4))
-    db.execute("INSERT INTO keys (key, panel_guild_id, panel_channel_id, time_limit, used) VALUES ($1, $2, $3, $4, $5)", 
-               key, interaction.guild.id, channel.id, 24, 0)
-    
-    embed = discord.Embed(title="🎉 FREE KEY DROP!", description=f"**Key:** `{key}`\n**Duration:** 24 hours", color=discord.Color.gold())
-    
-    class CopyButton(discord.ui.View):
-        def __init__(self, k):
-            super().__init__(timeout=60)
-            self.k = k
-        @discord.ui.button(label="📋 Copy Key", style=discord.ButtonStyle.primary)
-        async def copy(self, i, b):
-            await i.response.send_message(f"✅ Key: `{self.k}`", ephemeral=True)
-    
-    await channel.send("@everyone 🎁 **FREE KEY DROP!**", embed=embed, view=CopyButton(key))
-    await interaction.followup.send(f"✅ Free key dropped in {channel.mention}", ephemeral=True)
-
-@bot.tree.command(name="listkeys", description="List all unused keys")
-async def slash_listkeys(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ Admin only!", ephemeral=True)
-        return
-    
-    keys = db.fetch("SELECT key, time_limit FROM keys WHERE used = 0 LIMIT 10")
-    if keys:
-        msg = "\n".join([f"`{k['key']}` - {k['time_limit']} hours" for k in keys])
-        await interaction.followup.send(f"📋 **Unused Keys:**\n{msg}", ephemeral=True)
-    else:
-        await interaction.followup.send("No unused keys.", ephemeral=True)
-
-@bot.tree.command(name="setbuyerrole", description="Set the role for buyers")
-@app_commands.describe(role="Role to give to buyers")
-async def slash_setbuyerrole(interaction: discord.Interaction, role: discord.Role):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ Admin only!", ephemeral=True)
-        return
-    
-    db.execute("INSERT INTO buyer_roles (guild_id, role_id) VALUES ($1, $2) ON CONFLICT(guild_id) DO UPDATE SET role_id = $2", 
-               interaction.guild.id, role.id)
-    await interaction.followup.send(f"✅ Buyer role set to {role.mention}", ephemeral=True)
-
-@bot.tree.command(name="ban", description="Ban a user")
-@app_commands.describe(user="User to ban", reason="Reason for ban")
-async def slash_ban(interaction: discord.Interaction, user: discord.User, reason: str = "No reason"):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.ban_members:
-        await interaction.followup.send("❌ No permission!", ephemeral=True)
-        return
-    member = interaction.guild.get_member(user.id)
-    if member:
-        await member.ban(reason=reason)
-        await interaction.followup.send(f"✅ Banned {user.mention}", ephemeral=True)
-    else:
-        await interaction.followup.send("❌ User not found", ephemeral=True)
-
-@bot.tree.command(name="timeout", description="Timeout a user")
-@app_commands.describe(user="User to timeout", minutes="Minutes to timeout", reason="Reason")
-async def slash_timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason"):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.moderate_members:
-        await interaction.followup.send("❌ No permission!", ephemeral=True)
-        return
-    await user.timeout(timedelta(minutes=minutes), reason=reason)
-    await interaction.followup.send(f"✅ Timed out {user.mention} for {minutes} minutes", ephemeral=True)
-
-@bot.tree.command(name="warn", description="Warn a user")
-@app_commands.describe(user="User to warn", reason="Reason for warning")
-async def slash_warn(interaction: discord.Interaction, user: discord.User, reason: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    embed = discord.Embed(title="⚠️ Warning", description=f"In {interaction.guild.name}\nReason: {reason}", color=discord.Color.orange())
-    try:
-        await user.send(embed=embed)
-        await interaction.followup.send(f"✅ Warned {user.mention}", ephemeral=True)
-    except:
-        await interaction.followup.send(f"✅ Warned {user.mention} (DM failed)", ephemeral=True)
-
-@bot.tree.command(name="update", description="Post an update in a channel")
-@app_commands.describe(channel="Channel to post in", message="Update message")
-async def slash_update(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ Admin only!", ephemeral=True)
-        return
-    
-    embed = discord.Embed(title="📢 Update", description=message, color=discord.Color.blue(), timestamp=datetime.now())
-    embed.set_footer(text=f"Posted by {interaction.user.name}")
-    await channel.send(embed=embed)
-    await interaction.followup.send(f"✅ Update posted in {channel.mention}", ephemeral=True)
-
-# ============ BUTTON PANEL ============
-
-class PanelView(discord.ui.View):
+class VexisFinderBot(commands.Bot):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(command_prefix="!", intents=intents)
+        self.ws_handler = None
+        self.webhook_manager = WebhookManager()
     
-    @discord.ui.button(label="💳 Buy Access", style=discord.ButtonStyle.success, emoji="💰")
-    async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="💳 Purchase Access",
-            description="To get access, purchase a key from our store!\n\nAfter purchase, use the **Redeem Key** button.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    async def setup_hook(self):
+        await self.webhook_manager.init_session()
+        await self.tree.sync()
+        logger.info("Commands synced!")
     
-    @discord.ui.button(label="🔑 Redeem Key", style=discord.ButtonStyle.primary, emoji="🔑")
-    async def redeem_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = RedeemModal()
-        await interaction.response.send_modal(modal)
+    async def on_ready(self):
+        init_db()
+        logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
+        await self.start_websocket()
     
-    @discord.ui.button(label="📜 Get Script", style=discord.ButtonStyle.secondary, emoji="📜")
-    async def script_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check if user has access
-        has_access = db.fetchrow("SELECT * FROM whitelist WHERE user_id = $1", interaction.user.id)
-        key_used = db.fetchrow("SELECT * FROM keys WHERE used_by = $1 AND used = 1", interaction.user.id)
+    async def start_websocket(self):
+        async def on_ws_message(data):
+            # Process incoming WebSocket data
+            await self.process_finding(data)
         
-        if has_access or key_used:
-            script = db.fetchrow("SELECT script_name FROM scripts WHERE guild_id = $1 LIMIT 1", interaction.guild.id)
-            railway_url = os.getenv('RAILWAY_URL', 'https://raul-scripts-bot-production.up.railway.app')
-            
-            if script:
-                loadstring_url = f"{railway_url}/getscript?guild={interaction.guild.id}&name={script['script_name']}&user={interaction.user.id}"
-            else:
-                loadstring_url = f"{railway_url}/getscript?user={interaction.user.id}"
-            
-            embed = discord.Embed(
-                title="📜 Your Script Loader",
-                description=f"```lua\nloadstring(game:HttpGet(\"{loadstring_url}\"))()\n```",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="⚠️ Note", value="This loader is unique to you. Don't share it!", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            embed = discord.Embed(
-                title="❌ Access Denied",
-                description="You don't have access to this script!\n\nPurchase a key and redeem it first.",
-                color=discord.Color.red()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        self.ws_handler = WebSocketHandler(config.WEBSOCKET_URL, on_ws_message)
+        await self.ws_handler.connect()
+        logger.info("WebSocket handler started")
     
-    @discord.ui.button(label="👑 Get Role", style=discord.ButtonStyle.danger, emoji="👑")
-    async def role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        has_access = db.fetchrow("SELECT * FROM whitelist WHERE user_id = $1", interaction.user.id)
-        key_used = db.fetchrow("SELECT * FROM keys WHERE used_by = $1 AND used = 1", interaction.user.id)
+    async def process_finding(self, data):
+        """Process a finding and send to all configured channels"""
+        # Expected data format - adapt to your WebSocket's actual format
+        # This handles multiple possible formats
+        finding = None
         
-        if has_access or key_used:
-            role_data = db.fetchrow("SELECT role_id FROM buyer_roles WHERE guild_id = $1", interaction.guild.id)
-            if role_data:
-                role = interaction.guild.get_role(role_data['role_id'])
-                if role:
-                    await interaction.user.add_roles(role)
-                    await interaction.response.send_message(f"✅ You got the {role.name} role!", ephemeral=True)
-                else:
-                    await interaction.response.send_message("❌ Role not found!", ephemeral=True)
-            else:
-                await interaction.response.send_message("❌ No buyer role set! Use `/setbuyerrole`", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ You need to purchase access first!", ephemeral=True)
-
-class RedeemModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="Redeem Key")
-        self.key_input = discord.ui.TextInput(label="Enter your key:", placeholder="XXXX-XXXX-XXXX-XXXX", required=True)
-        self.add_item(self.key_input)
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        key = self.key_input.value.upper().strip()
+        if isinstance(data, dict):
+            # Case 1: Direct finding object
+            if "name" in data and "value" in data:
+                finding = data
+            # Case 2: Findings array
+            elif "findings" in data and isinstance(data["findings"], list):
+                for f in data["findings"]:
+                    await self.process_finding(f)
+                return
+            # Case 3: Nested structure
+            elif "data" in data and isinstance(data["data"], dict):
+                finding = data["data"]
         
-        # Check if already whitelisted
-        whitelisted = db.fetchrow("SELECT * FROM whitelist WHERE user_id = $1", interaction.user.id)
-        if whitelisted:
-            await interaction.response.send_message("✅ You already have lifetime access!", ephemeral=True)
+        if not finding:
+            logger.debug(f"Skipping non-finding message: {data}")
             return
         
-        # Check key
-        key_data = db.fetchrow("SELECT * FROM keys WHERE key = $1 AND used = 0", key)
-        if key_data:
-            db.execute("UPDATE keys SET used = 1, used_by = $1 WHERE key = $2", interaction.user.id, key)
-            db.execute("INSERT INTO whitelist (user_id) VALUES ($1) ON CONFLICT DO NOTHING", interaction.user.id)
-            
-            script = db.fetchrow("SELECT script_name FROM scripts WHERE guild_id = $1 LIMIT 1", interaction.guild.id)
-            railway_url = os.getenv('RAILWAY_URL', 'https://raul-scripts-bot-production.up.railway.app')
-            
-            if script:
-                loadstring_url = f"{railway_url}/getscript?guild={interaction.guild.id}&name={script['script_name']}&user={interaction.user.id}"
-            else:
-                loadstring_url = f"{railway_url}/getscript?user={interaction.user.id}"
-            
-            embed = discord.Embed(
-                title="✅ Access Granted!",
-                description=f"You now have access to the script!",
-                color=discord.Color.green()
+        # Add timestamp if missing
+        if "timestamp" not in finding:
+            finding["timestamp"] = int(datetime.now().timestamp())
+        
+        # Set default tier if missing
+        if "tier" not in finding:
+            finding["tier"] = "Highlights" if finding.get("value", 0) > 50000 else "Midlights"
+        
+        # Create embed
+        embed = create_finding_embed(finding)
+        
+        # Send to all guilds that have configured channels
+        for guild in self.guilds:
+            channel_ids = get_channels(guild.id)
+            if channel_ids:
+                # Refresh webhooks if needed
+                if guild.id not in self.webhook_manager.webhooks or len(self.webhook_manager.webhooks[guild.id]) != len(channel_ids):
+                    await self.webhook_manager.refresh_webhooks(guild, channel_ids)
+                
+                await self.webhook_manager.send_to_all_webhooks(guild.id, embed)
+        
+        logger.info(f"Sent finding: {finding.get('name')} - {finding.get('value')}")
+    
+    async def close(self):
+        if self.ws_handler:
+            await self.ws_handler.disconnect()
+        await self.webhook_manager.close_session()
+        await super().close()
+
+bot = VexisFinderBot()
+
+# ============= SLASH COMMANDS =============
+
+@bot.tree.command(name="setch", description="Set channels for Vexis Finder notifications (creates webhooks)")
+@app_commands.describe(channel1="First channel", channel2="Second channel", channel3="Third channel")
+async def setch(interaction: discord.Interaction, channel1: discord.TextChannel, channel2: discord.TextChannel = None, channel3: discord.TextChannel = None):
+    """Set up to 3 channels to receive Vexis Finder notifications"""
+    
+    # Check permissions
+    for ch in [channel1, channel2, channel3]:
+        if ch:
+            perms = ch.permissions_for(interaction.guild.me)
+            if not perms.manage_webhooks or not perms.send_messages:
+                await interaction.response.send_message(f"❌ Missing permissions in {ch.mention}. Need `Manage Webhooks` and `Send Messages`.", ephemeral=True)
+                return
+    
+    channels = [ch.id for ch in [channel1, channel2, channel3] if ch]
+    
+    if not channels:
+        await interaction.response.send_message("❌ Please specify at least one channel!", ephemeral=True)
+        return
+    
+    # Save to database
+    set_channels(interaction.guild_id, channels)
+    
+    # Create webhooks
+    webhooks = await bot.webhook_manager.refresh_webhooks(interaction.guild, channels)
+    
+    embed = create_config_embed(channels)
+    embed.add_field(name="✅ Status", value=f"Created {len(webhooks)} webhook(s) successfully!", inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+    logger.info(f"Configured guild {interaction.guild_id} with channels {channels}")
+
+@bot.tree.command(name="reconnect", description="Reconnect to the Vexis Finder WebSocket")
+async def reconnect_ws(interaction: discord.Interaction):
+    """Force a reconnection to the WebSocket"""
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        if bot.ws_handler:
+            await bot.ws_handler.reconnect()
+            embed = create_status_embed(
+                "🔄 WebSocket Reconnected",
+                "Successfully reconnected to the Vexis Finder WebSocket!\nAll logs will now be received again.",
+                is_error=False
             )
-            embed.add_field(name="📜 Your Loadstring", value=f"```lua\nloadstring(game:HttpGet(\"{loadstring_url}\"))()\n```", inline=False)
-            
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            
-            # Log
-            log_channel = discord.utils.get(interaction.guild.text_channels, name="key-logs")
-            if log_channel:
-                await log_channel.send(f"✅ {interaction.user} redeemed key: `{key}`")
+            await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            await interaction.response.send_message("❌ Invalid or already used key!", ephemeral=True)
+            await bot.start_websocket()
+            embed = create_status_embed(
+                "🔌 WebSocket Started",
+                "WebSocket connection has been established.",
+                is_error=False
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        embed = create_status_embed(
+            "❌ Reconnection Failed",
+            f"Error: {str(e)[:100]}",
+            is_error=True
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        logger.error(f"Reconnect error: {e}")
 
-# ============ KEEP ALIVE ============
+@bot.tree.command(name="status", description="Check Vexis Finder bot status")
+async def status(interaction: discord.Interaction):
+    """Check the status of the bot and WebSocket connection"""
+    channels = get_channels(interaction.guild_id)
+    
+    ws_status = "🟢 Connected" if bot.ws_handler and bot.ws_handler.websocket else "🔴 Disconnected"
+    ws_status += " (Auto-reconnecting)" if bot.ws_handler and bot.ws_handler._running else ""
+    
+    embed = discord.Embed(
+        title="📊 Vexis Finder Status",
+        description=f"**WebSocket:** {ws_status}\n**Configured Channels:** {len(channels)}\n**Guilds:** {len(bot.guilds)}",
+        color=0xD4AF37
+    )
+    
+    if channels:
+        channel_mentions = ", ".join([f"<#{ch}>" for ch in channels])
+        embed.add_field(name="📡 Active Channels", value=channel_mentions, inline=False)
+    
+    embed.set_footer(text="Vexis Finder • Black & Gold Edition")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def keep_alive():
-    while True:
-        await asyncio.sleep(300)
-        print("Bot alive...")
+@bot.tree.command(name="test", description="Send a test embed to configured channels")
+async def test_notification(interaction: discord.Interaction):
+    """Send a test notification to all configured channels"""
+    channels = get_channels(interaction.guild_id)
+    
+    if not channels:
+        await interaction.response.send_message("❌ No channels configured. Use `/setch` first!", ephemeral=True)
+        return
+    
+    test_data = {
+        "name": "🐉 TEST PET - Hydra Dragon",
+        "value": 1234567,
+        "tier": "Highlights",
+        "job_id": "test_job_12345",
+        "timestamp": int(datetime.now().timestamp())
+    }
+    
+    embed = create_finding_embed(test_data)
+    embed.description = "**TEST NOTIFICATION**\n" + embed.description
+    
+    await bot.webhook_manager.refresh_webhooks(interaction.guild, channels)
+    await bot.webhook_manager.send_to_all_webhooks(interaction.guild_id, embed)
+    
+    await interaction.response.send_message(f"✅ Test notification sent to {len(channels)} channel(s)!", ephemeral=True)
 
+@bot.tree.command(name="removech", description="Remove all configured channels for this server")
+async def remove_channels(interaction: discord.Interaction):
+    """Remove all channel configurations for this server"""
+    channels = get_channels(interaction.guild_id)
+    
+    if not channels:
+        await interaction.response.send_message("❌ No channels are currently configured!", ephemeral=True)
+        return
+    
+    # Remove from database
+    remove_guild(interaction.guild_id)
+    
+    # Clean up webhooks
+    if interaction.guild_id in bot.webhook_manager.webhooks:
+        for wh in bot.webhook_manager.webhooks[interaction.guild_id]:
+            try:
+                await wh.delete()
+            except:
+                pass
+        del bot.webhook_manager.webhooks[interaction.guild_id]
+    
+    embed = create_status_embed(
+        "🗑️ Configuration Removed",
+        f"Removed {len(channels)} configured channel(s). No more notifications will be sent.",
+        is_error=False
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ============= RUN THE BOT =============
 if __name__ == "__main__":
-    print("Starting Protection Bot...")
-    loop = asyncio.get_event_loop()
-    loop.create_task(keep_alive())
-    bot.run(config.TOKEN)
+    try:
+        bot.run(config.TOKEN)
+    except KeyboardInterrupt:
+        print("Bot shutting down...")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
