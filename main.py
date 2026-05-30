@@ -105,7 +105,7 @@ class VexisFinderBot(commands.Bot):
         self.ws_task = None
         self.ws = None
         self.session = None
-        self.webhooks: Dict[int, List[discord.Webhook]] = {}
+        self._running = True
     
     async def setup_hook(self):
         await self.tree.sync()
@@ -115,67 +115,89 @@ class VexisFinderBot(commands.Bot):
     
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
-        await self.start_websocket()
+        # Start WebSocket connection in background
+        asyncio.create_task(self.websocket_loop())
     
-    async def start_websocket(self):
-        async def handle_message(message):
+    async def websocket_loop(self):
+        """Main WebSocket connection loop with auto-reconnect"""
+        while self._running:
             try:
-                data = json.loads(message)
-                logger.info(f"Received: {data}")
-                await self.process_finding(data)
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON: {message}")
+                logger.info(f"Connecting to WebSocket: {WEBSOCKET_URL}")
+                async with websockets.connect(
+                    WEBSOCKET_URL, 
+                    ping_interval=20, 
+                    ping_timeout=10,
+                    close_timeout=5
+                ) as ws:
+                    self.ws = ws
+                    logger.info("✅ WebSocket connected!")
+                    
+                    # Listen for messages
+                    async for message in ws:
+                        try:
+                            data = json.loads(message)
+                            logger.info(f"📨 Received: {data}")
+                            await self.process_finding(data)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Invalid JSON: {message}")
+                        except Exception as e:
+                            logger.error(f"Error processing message: {e}")
+                            
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("⚠️ WebSocket disconnected, reconnecting...")
             except Exception as e:
-                logger.error(f"Error processing: {e}")
-        
-        async def websocket_loop():
-            while True:
-                try:
-                    logger.info(f"Connecting to WebSocket: {WEBSOCKET_URL}")
-                    async with websockets.connect(WEBSOCKET_URL, ping_interval=30, ping_timeout=10) as ws:
-                        self.ws = ws
-                        logger.info("WebSocket connected!")
-                        async for message in ws:
-                            await handle_message(message)
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("WebSocket disconnected, reconnecting...")
-                except Exception as e:
-                    logger.error(f"WebSocket error: {e}")
+                logger.error(f"WebSocket error: {e}")
+            
+            # Wait before reconnecting
+            if self._running:
                 await asyncio.sleep(5)
-        
-        self.ws_task = asyncio.create_task(websocket_loop())
     
     async def process_finding(self, data):
+        """Process incoming WebSocket data and send to channels"""
         # Handle different data formats
         finding = None
-        if "name" in data and "value" in data:
-            finding = data
-        elif "findings" in data and isinstance(data["findings"], list):
-            for f in data["findings"]:
-                await self.process_finding(f)
-            return
-        elif "data" in data and isinstance(data["data"], dict):
-            finding = data["data"]
+        
+        if isinstance(data, dict):
+            # Direct finding object
+            if "name" in data and "value" in data:
+                finding = data
+            # Findings array
+            elif "findings" in data and isinstance(data["findings"], list):
+                for f in data["findings"]:
+                    await self.process_finding(f)
+                return
+            # Nested data
+            elif "data" in data and isinstance(data["data"], dict):
+                finding = data["data"]
         
         if not finding:
+            logger.debug(f"Skipping non-finding message: {data}")
             return
         
+        # Set default tier if missing
         if "tier" not in finding:
             finding["tier"] = "Highlights" if finding.get("value", 0) > 50000 else "Midlights"
         
+        # Add timestamp if missing
+        if "timestamp" not in finding:
+            finding["timestamp"] = int(datetime.now().timestamp())
+        
+        # Create embed
         embed = create_finding_embed(finding)
         
+        # Send to all configured guilds
         for guild in self.guilds:
             channel_ids = get_channels(guild.id)
             if channel_ids:
                 await self.send_to_channels(guild, channel_ids, embed)
     
     async def send_to_channels(self, guild: discord.Guild, channel_ids: List[int], embed: discord.Embed):
+        """Send embed to all configured channels using webhooks"""
         for channel_id in channel_ids:
             channel = guild.get_channel(channel_id)
             if channel and isinstance(channel, (discord.TextChannel, discord.Thread)):
                 try:
-                    # Check/create webhook
+                    # Check for existing webhook
                     webhooks = await channel.webhooks()
                     webhook = None
                     for wh in webhooks:
@@ -183,32 +205,44 @@ class VexisFinderBot(commands.Bot):
                             webhook = wh
                             break
                     
+                    # Create new webhook if none exists
                     if not webhook:
                         webhook = await channel.create_webhook(name="VexisFinder")
                     
+                    # Send the embed
                     await webhook.send(embed=embed, username="Vexis Finder")
+                    logger.info(f"✅ Sent to #{channel.name}")
+                    
+                except discord.Forbidden:
+                    logger.error(f"❌ No permission to send to #{channel.name}")
                 except Exception as e:
-                    logger.error(f"Failed to send to {channel.name}: {e}")
+                    logger.error(f"❌ Failed to send to #{channel.name}: {e}")
     
     async def reconnect_websocket(self):
-        if self.ws_task:
-            self.ws_task.cancel()
+        """Force reconnect the WebSocket"""
+        if self.ws:
             try:
-                await self.ws_task
-            except asyncio.CancelledError:
+                await self.ws.close()
+            except:
                 pass
-        await self.start_websocket()
+        # The loop will auto-reconnect
+        logger.info("🔄 Manual reconnect triggered")
     
     async def close(self):
-        if self.ws_task:
-            self.ws_task.cancel()
+        self._running = False
+        if self.ws:
+            try:
+                await self.ws.close()
+            except:
+                pass
         if self.session:
             await self.session.close()
         await super().close()
 
 bot = VexisFinderBot()
 
-# Slash Commands
+# ============= SLASH COMMANDS =============
+
 @bot.tree.command(name="setch", description="Set channels for Vexis Finder notifications")
 @app_commands.describe(
     channel1="First channel",
@@ -270,7 +304,9 @@ async def reconnect_ws(interaction: discord.Interaction):
 async def status(interaction: discord.Interaction):
     channels = get_channels(interaction.guild_id)
     
-    ws_status = "🟢 Connected" if bot.ws and bot.ws.open else "🔴 Disconnected"
+    # Check WebSocket status
+    ws_connected = bot.ws and not bot.ws.closed
+    ws_status = "🟢 Connected" if ws_connected else "🔴 Disconnected"
     
     embed = discord.Embed(
         title="📊 Vexis Finder Status",
@@ -300,7 +336,7 @@ async def test_notification(interaction: discord.Interaction):
     }
     
     embed = create_finding_embed(test_data)
-    embed.description = "**TEST NOTIFICATION**\n" + embed.description
+    embed.description = "**🧪 TEST NOTIFICATION**\n" + embed.description
     
     await interaction.response.send_message(f"✅ Sending test notification to {len(channels)} channel(s)...", ephemeral=True)
     
@@ -317,6 +353,7 @@ async def test_notification(interaction: discord.Interaction):
                 if not webhook:
                     webhook = await channel.create_webhook(name="VexisFinder")
                 await webhook.send(embed=embed, username="Vexis Finder")
+                logger.info(f"Test sent to #{channel.name}")
             except Exception as e:
                 logger.error(f"Test failed for {channel.name}: {e}")
 
@@ -332,12 +369,12 @@ async def remove_channels(interaction: discord.Interaction):
     
     embed = discord.Embed(
         title="🗑️ Configuration Removed",
-        description=f"Removed {len(channels)} configured channel(s).",
+        description=f"Removed {len(channels)} configured channel(s). No more notifications will be sent.",
         color=GOLD
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# Run the bot
+# ============= RUN THE BOT =============
 if __name__ == "__main__":
     try:
         bot.run(TOKEN)
