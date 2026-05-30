@@ -7,41 +7,40 @@ import sqlite3
 import os
 import websockets
 import aiohttp
+from aiohttp import web
 from datetime import datetime
 from typing import List, Dict, Optional
 import logging
 from threading import Thread
-from flask import Flask
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flask web server for Railway keep-alive
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Vexis Finder Bot is running!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# Start web server in a separate thread
-Thread(target=run_web_server, daemon=True).start()
-logger.info("Web server started on port 8080")
-
 # Config
 TOKEN = os.environ.get("TOKEN")
 WEBSOCKET_URL = "wss://join.signorefinderws.org/ws"
+PORT = int(os.environ.get("PORT", 8080))
 
 if not TOKEN:
     raise ValueError("TOKEN environment variable not set")
+
+# Simple aiohttp web server for Railway keep-alive
+async def handle_health(request):
+    return web.Response(text="Vexis Finder Bot is running!", status=200)
+
+async def handle_root(request):
+    return web.Response(text="✅ Vexis Finder Bot Online", status=200)
+
+def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_root)
+    app.router.add_get('/health', handle_health)
+    web.run_app(app, host='0.0.0.0', port=PORT)
+
+# Start web server in a separate thread
+Thread(target=run_web_server, daemon=True).start()
+logger.info(f"Web server started on port {PORT}")
 
 # Database setup
 DB_PATH = "vexis_data.db"
@@ -175,19 +174,15 @@ class VexisFinderBot(commands.Bot):
     
     async def process_finding(self, data):
         """Process incoming WebSocket data and send to channels"""
-        # Handle different data formats
         finding = None
         
         if isinstance(data, dict):
-            # Direct finding object
             if "name" in data and "value" in data:
                 finding = data
-            # Findings array
             elif "findings" in data and isinstance(data["findings"], list):
                 for f in data["findings"]:
                     await self.process_finding(f)
                 return
-            # Nested data
             elif "data" in data and isinstance(data["data"], dict):
                 finding = data["data"]
         
@@ -195,30 +190,24 @@ class VexisFinderBot(commands.Bot):
             logger.debug(f"Skipping non-finding message: {data}")
             return
         
-        # Set default tier if missing
         if "tier" not in finding:
             finding["tier"] = "Highlights" if finding.get("value", 0) > 50000 else "Midlights"
         
-        # Add timestamp if missing
         if "timestamp" not in finding:
             finding["timestamp"] = int(datetime.now().timestamp())
         
-        # Create embed
         embed = create_finding_embed(finding)
         
-        # Send to all configured guilds
         for guild in self.guilds:
             channel_ids = get_channels(guild.id)
             if channel_ids:
                 await self.send_to_channels(guild, channel_ids, embed)
     
     async def send_to_channels(self, guild: discord.Guild, channel_ids: List[int], embed: discord.Embed):
-        """Send embed to all configured channels using webhooks"""
         for channel_id in channel_ids:
             channel = guild.get_channel(channel_id)
             if channel and isinstance(channel, (discord.TextChannel, discord.Thread)):
                 try:
-                    # Check for existing webhook
                     webhooks = await channel.webhooks()
                     webhook = None
                     for wh in webhooks:
@@ -226,11 +215,9 @@ class VexisFinderBot(commands.Bot):
                             webhook = wh
                             break
                     
-                    # Create new webhook if none exists
                     if not webhook:
                         webhook = await channel.create_webhook(name="VexisFinder")
                     
-                    # Send the embed
                     await webhook.send(embed=embed, username="Vexis Finder")
                     logger.info(f"✅ Sent to #{channel.name}")
                     
@@ -240,13 +227,11 @@ class VexisFinderBot(commands.Bot):
                     logger.error(f"❌ Failed to send to #{channel.name}: {e}")
     
     async def reconnect_websocket(self):
-        """Force reconnect the WebSocket"""
         if self.ws:
             try:
                 await self.ws.close()
             except:
                 pass
-        # The loop will auto-reconnect
         logger.info("🔄 Manual reconnect triggered")
     
     async def close(self):
@@ -278,7 +263,6 @@ async def setch(
 ):
     channels = [ch for ch in [channel1, channel2, channel3] if ch]
     
-    # Check permissions
     for ch in channels:
         perms = ch.permissions_for(interaction.guild.me)
         if not perms.manage_webhooks or not perms.send_messages:
@@ -288,7 +272,6 @@ async def setch(
             )
             return
     
-    # Save to database
     set_channels(interaction.guild_id, [ch.id for ch in channels])
     
     embed = discord.Embed(
@@ -300,7 +283,7 @@ async def setch(
     embed.set_footer(text="Vexis Finder • Black & Gold Edition")
     
     await interaction.response.send_message(embed=embed)
-    logger.info(f"Configured guild {interaction.guild_id} with channels {[ch.id for ch in channels]}")
+    logger.info(f"Configured guild {interaction.guild_id}")
 
 @bot.tree.command(name="reconnect", description="Reconnect to the Vexis Finder WebSocket")
 async def reconnect_ws(interaction: discord.Interaction):
@@ -325,7 +308,6 @@ async def reconnect_ws(interaction: discord.Interaction):
 async def status(interaction: discord.Interaction):
     channels = get_channels(interaction.guild_id)
     
-    # Check WebSocket status
     ws_connected = bot.ws and not getattr(bot.ws, 'closed', True)
     ws_status = "🟢 Connected" if ws_connected else "🔴 Disconnected"
     
@@ -390,7 +372,7 @@ async def remove_channels(interaction: discord.Interaction):
     
     embed = discord.Embed(
         title="🗑️ Configuration Removed",
-        description=f"Removed {len(channels)} configured channel(s). No more notifications will be sent.",
+        description=f"Removed {len(channels)} configured channel(s).",
         color=GOLD
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
