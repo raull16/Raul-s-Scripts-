@@ -10,10 +10,31 @@ import aiohttp
 from datetime import datetime
 from typing import List, Dict, Optional
 import logging
+from threading import Thread
+from flask import Flask
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Flask web server for Railway keep-alive
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Vexis Finder Bot is running!"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+# Start web server in a separate thread
+Thread(target=run_web_server, daemon=True).start()
+logger.info("Web server started on port 8080")
 
 # Config
 TOKEN = os.environ.get("TOKEN")
@@ -305,7 +326,7 @@ async def status(interaction: discord.Interaction):
     channels = get_channels(interaction.guild_id)
     
     # Check WebSocket status
-    ws_connected = bot.ws and not bot.ws.closed
+    ws_connected = bot.ws and not getattr(bot.ws, 'closed', True)
     ws_status = "🟢 Connected" if ws_connected else "🔴 Disconnected"
     
     embed = discord.Embed(
